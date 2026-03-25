@@ -37,7 +37,7 @@ var selectedVillages = villagesClean.filter(
 );
 
 //-----------------------------------------------
-// 3. CLOUD MASK FUNCTION
+// 3. SENTINEL-2 CLOUD MASK
 //-----------------------------------------------
 function maskS2(img){
   var qa = img.select('QA60');
@@ -52,45 +52,70 @@ function maskS2(img){
 }
 
 //-----------------------------------------------
-// 4. DATASET
+// 4. SENTINEL-2 DATA
 //-----------------------------------------------
-var dataset = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
   .filterDate('2023-11-20','2023-12-05')
   .filterBounds(selectedVillages)
   .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))
   .map(maskS2);
 
-//-----------------------------------------------
-// 5. COMPOSITE
-//-----------------------------------------------
-var image = dataset.median();
+// Composite
+var s2_image = s2.median();
+
+// Bands
+var B4 = s2_image.select('B4');   // RED
+var B8 = s2_image.select('B8');   // NIR
+
+var ndvi = s2_image.normalizedDifference(['B8','B4']).rename('NDVI');
 
 //-----------------------------------------------
-// 6. BANDS + NDVI
+// 5. SENTINEL-1 (BACKSCATTER)
 //-----------------------------------------------
-var B4 = image.select('B4');   // RED
-var B8 = image.select('B8');   // NIR
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2023-11-20','2023-12-05')
+  .filterBounds(selectedVillages)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')) // optional but stabilizes data
+  .select(['VV','VH']);
 
-var ndvi = image.normalizedDifference(['B8','B4']).rename('NDVI');
+// Composite
+var s1_image = s1.median();
 
+//-----------------------------------------------
+// 6. FINAL STACK (ALL FEATURES)
+//-----------------------------------------------
 var finalImage = ee.Image.cat([
   B4.rename('RED'),
   B8.rename('NIR'),
-  ndvi
+  ndvi,
+  s1_image.select('VV'),
+  s1_image.select('VH')
 ]);
 
 //-----------------------------------------------
-// 7. DISPLAY NDVI
+// 7. DISPLAY
 //-----------------------------------------------
-Map.setCenter(75.37, 24.02, 12); // Center on Mandsaur
+Map.setCenter(75.37, 24.02, 12);
+
 Map.addLayer(finalImage.select('NDVI'), 
              {min:0, max:1, palette:['white','green']}, 
              'NDVI');
 
+Map.addLayer(finalImage.select('VV'), 
+             {min:-20, max:0}, 
+             'VV Backscatter');
+
+Map.addLayer(finalImage.select('VH'), 
+             {min:-25, max:-5}, 
+             'VH Backscatter');
+
 //-----------------------------------------------
-// 8. EXTRACT RED, NIR & NDVI PER VILLAGE
+// 8. EXTRACT VALUES PER VILLAGE
 //-----------------------------------------------
-var bandsImage = finalImage.select(['RED','NIR','NDVI']);
+var bandsImage = finalImage.select(['RED','NIR','NDVI','VV','VH']);
 
 var villageStats = bandsImage.reduceRegions({
   collection: selectedVillages,
@@ -98,22 +123,24 @@ var villageStats = bandsImage.reduceRegions({
   scale: 10
 });
 
+// Keep only required fields
 var villageStatsWithName = villageStats.map(function(f){
   return ee.Feature(null, {
     'Villl_name': f.get('Villl_name'),
     'RED': f.get('RED'),
     'NIR': f.get('NIR'),
-    'NDVI': f.get('NDVI')
+    'NDVI': f.get('NDVI'),
+    'VV': f.get('VV'),
+    'VH': f.get('VH')
   });
 });
 
-print('Village RED, NIR, NDVI', villageStatsWithName);
 
 //-----------------------------------------------
 // 9. EXPORT TO CSV
 //-----------------------------------------------
 Export.table.toDrive({
   collection: villageStatsWithName,
-  description: 'Village_Red_NIR_NDVI',
+  description: 'Village_All_Features_S2_S1',
   fileFormat: 'CSV'
 });
