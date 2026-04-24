@@ -1,0 +1,186 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.optimizers import Adam
+
+
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+
+df = pd.read_csv(r"E:/poppy/Final_Training_Dataset.csv")
+
+print("Initial Shape:", df.shape)
+
+
+def clean_name(x):
+    return str(x).strip().lower().replace(" ", "")
+
+for col in ["Village", "District", "State"]:
+    df[col] = df[col].apply(clean_name)
+
+
+df = df.drop(columns=["Yield_std", "Yield_min", "Yield_max"], errors="ignore")
+df = df.drop(columns=["Village", "District", "State"], errors="ignore")
+
+
+y = df["Kg_per_Hectare"]
+X = df.drop(columns=["Kg_per_Hectare"])
+
+print("Features:", X.columns.tolist())
+
+#Handling Missing Values
+imputer = SimpleImputer(strategy="median")
+X = imputer.fit_transform(X)
+
+
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=SEED
+)
+
+print("Train:", X_train.shape, "Test:", X_test.shape)
+
+#Model
+def build_model(input_dim):
+    model = Sequential([
+        Dense(256, activation='relu', kernel_regularizer=l2(1e-4), input_shape=(input_dim,)),
+        BatchNormalization(),
+        Dropout(0.3),
+
+        Dense(128, activation='relu', kernel_regularizer=l2(1e-4)),
+        BatchNormalization(),
+        Dropout(0.2),
+
+        Dense(64, activation='relu', kernel_regularizer=l2(1e-4)),
+        BatchNormalization(),
+        Dropout(0.1),
+
+        Dense(1)
+    ])
+    return model
+
+model = build_model(X_train.shape[1])
+
+model.compile(
+    optimizer=Adam(learning_rate=0.001),
+    loss="mse",
+    metrics=["mae"]
+)
+
+model.summary()
+
+
+early_stop = EarlyStopping(
+    monitor="val_loss",
+    patience=15,
+    restore_best_weights=True
+)
+
+reduce_lr = ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.3,
+    patience=5,
+    min_lr=1e-6
+)
+
+
+history = model.fit(
+    X_train, y_train,
+    validation_split=0.2,
+    epochs=300,
+    batch_size=32,
+    callbacks=[early_stop, reduce_lr],
+    verbose=1
+)
+
+
+y_pred = model.predict(X_test).flatten()
+
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+mae  = mean_absolute_error(y_test, y_pred)
+r2   = r2_score(y_test, y_pred)
+
+print("\n FINAL RESULTS")
+print(f"RMSE: {rmse:.2f}")
+print(f"MAE:  {mae:.2f}")
+print(f"R2:   {r2:.4f}")
+
+
+#Model Saved
+
+import os
+
+SAVE_PATH = r"E:/poppy/"
+os.makedirs(SAVE_PATH, exist_ok=True)
+# ---------------------------
+# LOSS PLOT
+# ---------------------------
+plt.figure()
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title("Loss Curve")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.legend(["Train", "Val"])
+plt.savefig(SAVE_PATH + "loss_curve.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+#Results
+plt.figure()
+plt.scatter(y_test, y_pred)
+plt.xlabel("Actual")
+plt.ylabel("Predicted")
+
+min_val = min(y_test.min(), y_pred.min())
+max_val = max(y_test.max(), y_pred.max())
+
+plt.plot([min_val, max_val], [min_val, max_val])
+plt.title("Actual vs Predicted")
+plt.savefig(SAVE_PATH + "actual_vs_predicted.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+
+import seaborn as sns
+
+feature_names = df.drop(columns=["Kg_per_Hectare"]).columns
+
+X_test_df = pd.DataFrame(X_test, columns=feature_names)
+
+corr_df = pd.concat([
+    X_test_df,
+    pd.Series(y_test.values, name="Actual_Yield"),
+    pd.Series(y_pred, name="Predicted_Yield")
+], axis=1)
+
+plt.figure(figsize=(14, 10))
+sns.heatmap(corr_df.corr(), cmap="coolwarm", linewidths=0.5)
+plt.title("Correlation Matrix")
+plt.savefig(SAVE_PATH + "correlation_matrix.png", dpi=300, bbox_inches='tight')
+plt.close()
+
+print("All plots saved in:", SAVE_PATH)
+
+
+import joblib
+
+model.save(SAVE_PATH + "model.h5")
+joblib.dump(scaler, SAVE_PATH + "scaler.pkl")
+joblib.dump(imputer, SAVE_PATH + "imputer.pkl")
+
+print("Model + scaler + imputer saved successfully")
